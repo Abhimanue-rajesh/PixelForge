@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PIL import Image
 from PySide6.QtGui import QFontInfo
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QMessageBox, QPushButton
 
 from pixelforge.ui.main_window import MainWindow
 from pixelforge.ui.theme import apply_theme, load_fonts
@@ -68,6 +68,86 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.window.find_bar.isVisible())
         self.window.nav_buttons["metadata"].click()
         self.assertTrue(self.window.metadata_page.isVisible())
+        self.window.nav_buttons["rotation"].click()
+        self.assertTrue(self.window.rotation_page.isVisible())
+        self.window.nav_buttons["conversion"].click()
+        self.assertTrue(self.window.conversion_page.isVisible())
+
+    def test_conversion_format_selection_recursion_and_progress(self):
+        source = self.root / "nested" / "photo.png"
+        source.parent.mkdir()
+        Image.new("RGBA", (20, 12), (100, 30, 60, 80)).save(source)
+        original = source.read_bytes()
+        self.window.show_page("conversion")
+        page = self.window.conversion_page
+        self.assertEqual(page.format.currentData(), "JPEG")
+        self.assertTrue(page.subfolders.isChecked())
+        self.assertFalse(page.delete_originals.isChecked())
+        self.assertFalse(page.convert_btn.isEnabled())
+        with patch.object(QFileDialog, "getExistingDirectory", return_value=str(self.root)):
+            page.choose_btn.click()
+        page.format.setCurrentIndex(page.format.findData("TIFF"))
+        page.convert_btn.click()
+        self.assertTrue(self.window.busy)
+        self.assertFalse(page.format.isEnabled())
+        self.wait_idle()
+        with Image.open(source.with_suffix(".tiff")) as output:
+            self.assertEqual(output.format, "TIFF")
+            self.assertEqual(output.getpixel((0, 0)), (100, 30, 60, 80))
+        self.assertEqual(source.read_bytes(), original)
+        self.assertIn("Images converted: 1", page.result.text())
+        self.assertTrue(self.window.progress.isVisible())
+        self.assertIn("Converting images: complete", self.window.progress_label.text())
+
+    def test_conversion_recycle_confirmation_can_be_cancelled(self):
+        source = self.root / "photo.png"
+        Image.new("RGB", (4, 4), "red").save(source)
+        self.window.show_page("conversion")
+        page = self.window.conversion_page
+        page.directory = self.root
+        page.delete_originals.setChecked(True)
+        page.refresh()
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as question:
+            page.start()
+            self.wait_idle()
+        self.assertIn("Images to convert: 1", question.call_args.args[2])
+        self.assertTrue(source.exists())
+        self.assertFalse(source.with_suffix(".jpg").exists())
+
+    def test_rotation_folder_controls_and_background_work(self):
+        source_dir = self.root / "source"
+        source_dir.mkdir()
+        output_dir = self.root / "output"
+        output_dir.mkdir()
+        source = source_dir / "photo.png"
+        Image.new("RGB", (20, 12), "red").save(source)
+        original = source.read_bytes()
+        self.window.nav_buttons["rotation"].click()
+        page = self.window.rotation_page
+        self.app.processEvents()
+        self.assertEqual(page.angle.value(), 45)
+        angle_edit = page.angle.findChild(QLineEdit)
+        self.assertGreaterEqual(angle_edit.width(), angle_edit.fontMetrics().horizontalAdvance(angle_edit.text()))
+        self.assertFalse(page.rotate_btn.isEnabled())
+        with patch.object(QFileDialog, "getExistingDirectory", side_effect=[str(source_dir), str(output_dir)]):
+            page.folder_buttons[0].click()
+            page.folder_buttons[1].click()
+        self.assertTrue(page.rotate_btn.isEnabled())
+        page.angle.setValue(90)
+        page.rotate_btn.click()
+        self.assertTrue(self.window.busy)
+        self.assertFalse(page.angle.isEnabled())
+        self.assertFalse(page.rotate_btn.isEnabled())
+        self.assertFalse(self.window.metadata_page.choose_btn.isEnabled())
+        self.window.show_page("metadata")
+        self.wait_idle()
+        self.window.show_page("rotation")
+        with Image.open(output_dir / "rotated_photo.png") as rotated:
+            self.assertEqual(rotated.size, (12, 20))
+        self.assertEqual(source.read_bytes(), original)
+        self.assertTrue((output_dir / "rotation.log").is_file())
+        self.assertIn("Images saved: 1", page.result.text())
+        self.assertTrue(page.rotate_btn.isEnabled())
 
     def test_empty_state_text_fits_without_overlapping(self):
         self.addCleanup(lambda: apply_theme(self.app, dark=False))
@@ -82,6 +162,36 @@ class WindowTests(unittest.TestCase):
                         title, text = self.window.empty_title, self.window.empty_text
                         self.assertGreaterEqual(text.height(), text.heightForWidth(text.width()))
                         self.assertLess(title.geometry().bottom(), text.geometry().top())
+
+    def test_progress_is_visible_with_counts_and_remains_after_completion(self):
+        self.window.show_page("rotation")
+        self.assertFalse(self.window.progress_panel.isVisible())
+        self.window.set_busy(False, "Rotating images")
+        self.app.processEvents()
+        self.assertTrue(self.window.progress.isVisible())
+        self.assertIn("0%", self.window.progress_label.text())
+        self.window.on_progress(3, 10)
+        self.assertEqual(self.window.progress.value(), 3)
+        self.assertEqual(self.window.progress.maximum(), 10)
+        self.assertIn("3 of 10 (30%)", self.window.progress_label.text())
+        self.window.show_page("home")
+        self.assertTrue(self.window.progress.isVisible())
+        self.window.set_idle()
+        self.assertTrue(self.window.progress.isVisible())
+        self.assertEqual(self.window.progress.value(), 10)
+        self.assertIn("complete (100%)", self.window.progress_label.text())
+
+    def test_unknown_progress_animates_and_failures_do_not_show_completion(self):
+        self.window.set_busy(True, "Removing metadata")
+        self.assertEqual(self.window.progress.maximum(), 0)
+        self.assertNotIn("%", self.window.progress_label.text())
+        with patch.object(QMessageBox, "critical"):
+            self.window.on_failed("Could not save image")
+        self.assertFalse(self.window.busy)
+        self.assertEqual(self.window.progress.maximum(), 100)
+        self.assertEqual(self.window.progress.value(), 0)
+        self.assertIn("stopped", self.window.progress_label.text())
+        self.assertNotIn("complete", self.window.progress_label.text())
 
     def test_duplicate_move_restart_review_and_undo(self):
         self.scan_fixture()

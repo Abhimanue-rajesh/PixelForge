@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -26,7 +27,9 @@ from pixelforge.core.duplicates import DuplicateGroup, human_size
 from pixelforge.core.log import duplicates_dir
 from pixelforge.core.organizer import files_to_gather
 from pixelforge.core.scanner import count_by_type, folder_stats
+from pixelforge.ui.conversion_page import ConversionPage
 from pixelforge.ui.metadata_page import MetadataPage
+from pixelforge.ui.rotation_page import RotationPage
 from pixelforge.ui.widgets import ElidedLabel, StatCard, StepBar, repolish
 from pixelforge.ui.workers import (
     FindWorker,
@@ -99,6 +102,8 @@ class MainWindow(QMainWindow):
             ("duplicates", "Duplicates"),
             ("gather", "Gather images"),
             ("metadata", "Remove metadata"),
+            ("rotation", "Rotate images"),
+            ("conversion", "Convert images"),
         ]
         for key, name in pages:
             button = self.button(name, lambda checked=False, p=key: self.show_page(p))
@@ -237,9 +242,20 @@ class MainWindow(QMainWindow):
         rb.addStretch()
         outer.addWidget(self.review_bar)
 
+        self.progress_panel = QFrame()
+        self.progress_panel.setProperty("card", True)
+        progress_layout = QVBoxLayout(self.progress_panel)
+        progress_layout.setContentsMargins(16, 12, 16, 12)
+        progress_layout.setSpacing(8)
+        self.progress_task = "Processing images"
+        self.progress_label = QLabel()
+        self.progress_label.setWordWrap(True)
+        progress_layout.addWidget(self.progress_label)
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
-        content.addWidget(self.progress)
+        progress_layout.addWidget(self.progress)
+        content.insertWidget(content.indexOf(self.pages), self.progress_panel)
+        self.progress_panel.hide()
 
         # Main area: empty state / folder overview / duplicate sets
         empty = QWidget()
@@ -270,6 +286,10 @@ class MainWindow(QMainWindow):
 
         self.metadata_page = MetadataPage(self)
         self.pages.addWidget(self.metadata_page)
+        self.rotation_page = RotationPage(self)
+        self.pages.addWidget(self.rotation_page)
+        self.conversion_page = ConversionPage(self)
+        self.pages.addWidget(self.conversion_page)
         self.show_page("home")
 
     def make_home(self):
@@ -286,6 +306,8 @@ class MainWindow(QMainWindow):
             ("duplicates", "Duplicates", "Find identical images, compare copies and choose what to keep."),
             ("gather", "Gather images", "Bring images from subfolders into one main folder."),
             ("metadata", "Remove metadata", "Save an image without embedded camera, location or other details."),
+            ("rotation", "Rotate images", "Rotate a folder of images by a chosen angle and save the results."),
+            ("conversion", "Convert images", "Convert images to JPG, PNG, WebP, BMP, TIFF or GIF."),
         ):
             row = self.button("", lambda checked=False, p=key: self.show_page(p))
             row.setProperty("toolRow", True)
@@ -312,20 +334,30 @@ class MainWindow(QMainWindow):
                 label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             layout.addWidget(row)
         layout.addStretch()
-        return home
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(home)
+        home.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
+        return scroll
 
     def show_page(self, page: str):
         self.page = page
         titles = {
             "home": "Home", "duplicates": "Duplicates",
             "gather": "Gather images", "metadata": "Remove metadata",
+            "rotation": "Rotate images",
+            "conversion": "Convert images",
         }
         self.page_title.setText(titles[page])
         self.nav_buttons[page].setChecked(True)
         self.nav_buttons[page].setFocus(Qt.FocusReason.OtherFocusReason)
-        self.pages.setCurrentWidget(
-            self.home_page if page == "home" else self.metadata_page if page == "metadata" else self.workspace
-        )
+        pages = {
+            "home": self.home_page, "metadata": self.metadata_page,
+            "rotation": self.rotation_page, "conversion": self.conversion_page,
+        }
+        self.pages.setCurrentWidget(pages.get(page, self.workspace))
         self.refresh()
 
     # ---- small helpers --------------------------------------------------
@@ -375,7 +407,6 @@ class MainWindow(QMainWindow):
             "Finish reviewing or undo the pending duplicate sets in Duplicates before gathering images."
             if reviewing else "Images in subfolders will move into the chosen folder. Duplicate filenames get a numbered suffix."
         )
-        self.progress.setVisible(self.busy)
         self.pick_btn.setEnabled(ok)
         self.subfolders.setEnabled(ok)
         self.remove_empty.setEnabled(ok)
@@ -383,6 +414,8 @@ class MainWindow(QMainWindow):
         self.move_btn.setEnabled(ok and bool(self.groups))
         self.gather_btn.setEnabled(ok and self.nested > 0 and not reviewing)
         self.metadata_page.refresh()
+        self.rotation_page.refresh()
+        self.conversion_page.refresh()
         self.keep_btn.setEnabled(ok and bool(self.sets_tree.selectedItems()))
         for b in (self.keep_all_btn, self.undo_btn, self.open_btn):
             b.setEnabled(ok)
@@ -435,9 +468,12 @@ class MainWindow(QMainWindow):
             self.card_sets.set_value("–", "Duplicate sets")
             self.card_extra.set_value("–")
 
-    def set_busy(self, indeterminate: bool):
+    def set_busy(self, indeterminate: bool, task: str = "Processing images"):
         self.busy = True
         self.show_flash("")
+        self.progress_task = task
+        self.progress_label.setText(f"{task}…" if indeterminate else f"{task}… 0%")
+        self.progress_panel.show()
         (
             self.progress.setRange(0, 0)
             if indeterminate
@@ -447,8 +483,16 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
         self.refresh()
 
-    def set_idle(self):
+    def set_idle(self, success: bool = True):
         self.busy = False
+        if self.progress.maximum() == 0:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+        if success:
+            self.progress.setValue(self.progress.maximum())
+        self.progress_label.setText(
+            f"{self.progress_task}: complete (100%)" if success else f"{self.progress_task}: stopped"
+        )
         self.refresh()
 
     def run_worker(self, worker):
@@ -459,11 +503,13 @@ class MainWindow(QMainWindow):
 
     def on_failed(self, message: str):
         QMessageBox.critical(self, "Something went wrong", message)
-        self.set_idle()
+        self.set_idle(success=False)
 
     def on_progress(self, done: int, total: int):
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(done)
+        percent = done * 100 // max(total, 1)
+        self.progress_label.setText(f"{self.progress_task}… {done} of {total} ({percent}%)")
 
     def warn(self, errors: list):
         if errors:
@@ -493,7 +539,7 @@ class MainWindow(QMainWindow):
             return
         self.files, self.groups, self.pending, self.nested = [], [], [], 0
         self.set_summary("")
-        self.set_busy(True)
+        self.set_busy(True, "Scanning folder")
         w = ScanWorker(self.folder, self.subfolders.isChecked())
         w.done.connect(self.on_scanned)
         self.run_worker(w)
@@ -550,7 +596,7 @@ class MainWindow(QMainWindow):
     def start_check(self):
         self.groups = []
         self.set_summary("Looking for duplicates…")
-        self.set_busy(False)
+        self.set_busy(False, "Finding duplicates")
         w = FindWorker(self.files)
         w.progress.connect(self.on_progress)
         w.done.connect(self.on_found)
@@ -584,7 +630,7 @@ class MainWindow(QMainWindow):
         )
         if answer != YES:
             return
-        self.set_busy(False)
+        self.set_busy(False, "Moving duplicate sets")
         w = MoveWorker(self.groups, self.folder)
         w.progress.connect(self.on_progress)
         w.done.connect(self.on_moved)
@@ -628,7 +674,7 @@ class MainWindow(QMainWindow):
             self.run_resolve({s["name"]: None for s in self.pending})
 
     def run_resolve(self, choices: dict):
-        self.set_busy(False)
+        self.set_busy(False, "Reviewing duplicate sets")
         w = ResolveWorker(self.folder, choices)
         w.progress.connect(self.on_progress)
         w.done.connect(self.on_resolved)
@@ -646,7 +692,7 @@ class MainWindow(QMainWindow):
         )
         if answer != YES:
             return
-        self.set_busy(False)
+        self.set_busy(False, "Restoring images")
         w = UndoWorker(self.folder)
         w.progress.connect(self.on_progress)
         w.done.connect(self.on_undone)
@@ -676,7 +722,7 @@ class MainWindow(QMainWindow):
         if answer != YES:
             return
         self.groups = []
-        self.set_busy(False)
+        self.set_busy(False, "Gathering images")
         w = GatherWorker(self.files, self.folder, self.remove_empty.isChecked())
         w.progress.connect(self.on_progress)
         w.done.connect(self.on_gathered)

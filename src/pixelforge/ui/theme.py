@@ -84,6 +84,17 @@ QPushButton[navigation="true"]:focus { border-top-color: $accent; border-bottom-
 QPushButton[toolRow="true"] { text-align: left; border-radius: 6px; padding: 0; }
 QPushButton[toolRow="true"] QLabel { background: transparent; }
 
+QScrollArea { background: transparent; border: none; }
+QComboBox { background: $card; color: $text; border: 1px solid $border; border-radius: 5px; padding: 7px 12px; }
+QComboBox:focus { border-color: $accent; }
+QComboBox:disabled { background: $disabled_bg; color: $disabled_text; }
+QComboBox QAbstractItemView { background: $card; color: $text; selection-background-color: $accent_soft; selection-color: $text; border: 1px solid $border; }
+
+QDoubleSpinBox { background: $card; color: $text; border: 1px solid $border; border-radius: 5px; padding: 7px 12px; min-width: 100px; }
+QDoubleSpinBox:focus { border-color: $accent; }
+QDoubleSpinBox:disabled { background: $disabled_bg; color: $disabled_text; }
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0px; border: none; }
+
 QCheckBox { color: $text; spacing: 8px; background: transparent; }
 QCheckBox::indicator { width: 18px; height: 18px; border: 1.5px solid $muted; border-radius: 5px; background: $card; }
 QCheckBox::indicator:hover { border-color: $accent; }

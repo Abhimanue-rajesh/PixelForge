@@ -4,11 +4,11 @@ Read this before changing anything. Update it when you change behaviour, structu
 
 ## 1. What this project is
 
-PixelForge is a **native-feeling Windows desktop image toolkit**. Home links to separate Duplicates, Gather images and Remove metadata pages. Duplicate finding is one feature, not the app's main identity. Date-based renaming and sorting are planned. It is meant to be **installed by other, non-technical users**, so it must feel like a normal Windows program with a safe, undo-able workflow.
+PixelForge is a **native-feeling Windows desktop image toolkit**. Home links to separate Duplicates, Gather images, Remove metadata, Rotate images and Convert images pages. Duplicate finding is one feature, not the app's main identity. Date-based renaming and sorting are planned. It is meant to be **installed by other, non-technical users**, so it must feel like a normal Windows program with a safe, undo-able workflow.
 
 - Language: Python 3.10+
 - UI: **PySide6 (Qt)**
-- Image handling: Pillow (`PIL`); `imagehash` is installed but **not used yet** (reserved for similar-image detection)
+- Image handling: Pillow (`PIL`); rotation uses `imageio.v2` (`imageio==2.38.1`, added for the supplied script) and the existing SciPy/NumPy dependencies. `imagehash` is installed but **not used yet** (reserved for similar-image detection).
 - Recycle Bin: `send2trash`
 - Packaging (planned, not done): PyInstaller in **folder mode** (not `--onefile`) + Inno Setup `Setup.exe`
 - Target OS: Windows (code is cross-platform Python, so it can be tested on Linux/macOS headless)
@@ -20,7 +20,7 @@ The owner started from a separate repo of loose scripts (`ImageManipulationScrip
 ```
 PixelForge/
 ├── run.py                  Dev launcher: adds src/ to sys.path, calls pixelforge.main.run()
-├── requirements.txt        PySide6, pillow, imagehash, send2trash
+├── requirements.txt        PySide6, pillow, imagehash, imageio, scipy, numpy, send2trash
 ├── setup.cfg
 ├── README.md
 ├── .gitignore              .venv/, venv/, __pycache__/, build/, dist/, *.spec
@@ -34,11 +34,15 @@ PixelForge/
     │   ├── review.py       pending_sets(), resolve_sets() (keep one), undo_all()
     │   ├── organizer.py    gather images from subfolders into the main folder
     │   ├── metadata.py     rebuild a still image from pixels, safely save or overwrite
+    │   ├── rotation.py     batch imageio/SciPy rotation, progress and per-file logging
+    │   ├── conversion.py   batch Pillow format conversion, safe filenames and optional recycling
     │   ├── dates.py        PLACEHOLDER from initial skeleton (rename/sort by date, not built)
     │   └── history.py      PLACEHOLDER from initial skeleton (undo lives in log.py/review.py now)
     └── ui/
         ├── main_window.py  the single main window and all workflow logic
         ├── metadata_page.py separate single-image metadata tool
+        ├── rotation_page.py separate input/output folder and rotation-angle controls
+        ├── conversion_page.py format selector, recursive folder conversion and recycle confirmation
         ├── workers.py      QThread wrappers around core functions
         ├── theme.py        stylesheet + light/dark palettes (follows the Windows setting)
         └── widgets.py      StatCard, StepBar, ElidedLabel, repolish()
@@ -67,6 +71,9 @@ PixelForge/
    - **Open Duplicates folder** opens it in Explorer.
 6. **Gather images** (separate sidebar page, disabled while duplicate sets await review): moves images from subfolders into the chosen folder; optional "Remove empty folders afterwards". Duplicates and Gather share the selected folder and scan state; navigating does not reset a workflow.
 7. **Remove metadata** (independent sidebar page): choose one image, then save a clean copy by default. An explicit checkbox and confirmation enable overwriting that original. The original script's pixel-recreation approach is retained; no EXIF rotation is applied. Supported extensions: JPEG, PNG, WebP, BMP, TIFF. Reject multi-frame images to avoid dropping frames. Indexed images convert to RGBA to preserve palette colours and transparency; WebP saves losslessly. JPEG re-encodes and rotation/colour-profile removal can affect appearance. Temporary encoding completes before replacing an original; save-as uses exclusive creation and never overwrites an existing destination. Metadata overwrite has no undo, as explicitly requested by the owner's script. Runs via `MetadataWorker`; rescans the shared photo folder after success when one is selected.
+8. **Rotate images** (independent sidebar page): choose input/output folders and an angle, default 45°. UI accepts -360° to 360° with two decimal places. Core retains `imageio.imread` → `ndimage.rotate(image, angle)` → `imageio.imwrite`, including SciPy's default axes, cubic interpolation, expanded canvas and zero fill. Uses the existing scanner with `recursive=False`, so only supported images directly in the input folder are processed. Validates still images with Pillow before processing to avoid silently dropping animation/TIFF frames. Saves `rotated_<filename>` using exclusive creation: existing outputs are skipped and partial failed outputs are removed. Logs start, per-file success/error and completion to console and `<output>/rotation.log` (append). No global logging configuration is changed. `RotationWorker` reports progress and returns saved paths/errors; one bad file does not stop the batch. Originals stay in place. Rescans a selected shared photo folder after completion.
+
+9. **Convert images** (independent sidebar page): choose a folder and JPG/PNG/WebP/BMP/TIFF/GIF. Include subfolders is on by default. `ConversionScanWorker` calls `files_to_convert()` in the background before conversion; the scan excludes existing target extensions and Duplicates review folders. `.jpeg` is converted to `.jpg` when JPG is selected, preserving the supplied script's behavior. `ConversionWorker` receives that file snapshot, writes alongside originals with collision suffixes from `unique_path()`, and uses exclusive creation to prevent overwrites even if a destination appears during processing. JPG uses RGB and quality 90, matching the supplied script exactly. Other formats use RGB/RGBA as supported; this is an 8-bit conversion tool, not a high-bit-depth or colour-managed export workflow. Animated/multi-page images are skipped. Original removal is off by default and uses `send2trash`, only after the saved file is fully decoded successfully. The UI confirms the candidate count and folder before recycling is enabled for a batch. Errors keep originals; failed outputs are removed where possible, and cleanup/recycling errors are reported while the batch continues. Console and `<folder>/conversion.log` record conversions, recycled sources and errors. No additional dependencies. Progress uses the shared panel; a selected shared photo folder is rescanned after conversion.
 
 ## 5. Key decisions and why
 
@@ -149,14 +156,20 @@ Location: `<root>/Duplicates/pixelforge_log.json`. Format (version 2):
 
 **core/metadata.py**: `remove_metadata(source, destination, overwrite=False) -> Path`. Core has no Qt imports; errors propagate to the worker. Overwrite only permits replacing the source itself. The destination extension must match the source; same-folder temporary files are cleaned up on success and failure.
 
-**ui/main_window.py**: `MainWindow`. State: `page, folder, files, groups (found, not moved), pending (moved, awaiting review), nested, busy, flash, workers`. `show_page()` selects Home, the shared Duplicates/Gather workspace, or MetadataPage. `refresh()` decides button visibility/enabled state and which tree is shown (overview tree vs sets tree). `flash` is a one-shot result message shown above the summary after the next rescan.
+**core/rotation.py**: `rotate_images(input_dir, output_dir, angle=45, progress=None) -> (list[Path], list[str])`. Rejects missing input folders and nonfinite angles. Creates the output directory as needed; never overwrites output images. Intended for still images, not animation/multi-page transforms.
+
+**ui/main_window.py**: `MainWindow`. State: `page, folder, files, groups (found, not moved), pending (moved, awaiting review), nested, busy, flash, workers`. `show_page()` selects Home, the shared Duplicates/Gather workspace, MetadataPage, RotationPage or ConversionPage. `refresh()` decides button visibility/enabled state and which tree is shown (overview tree vs sets tree). `flash` is a one-shot result message shown above the summary after the next rescan.
+
+**core/conversion.py**: `files_to_convert(directory, output_format, recursive=True) -> list[Path]`; `convert_images(files, directory, output_format="JPEG", delete_originals=False, progress=None) -> (saved_paths, recycled_count, errors)`. `OUTPUT_FORMATS` maps Pillow format names to output extensions. Core remains free of Qt.
+
+**ui/conversion_page.py**: `ConversionPage` is a scrollable independent page with its own folder selection, format combobox, subfolder and recycling options. Two workers separate planning/confirmation from conversion. Uses the shared busy state to disable mutation controls across tools.
 
 ## 8b. UI design system
 
 - `main.py` sets the **Fusion** style, registers bundled **Poppins** via `theme.load_fonts(app)`, then `theme.apply_theme(app)` installs one app-wide stylesheet and palette. It re-applies automatically when Windows switches light/dark (Qt 6.5+). Font files and their license must ship in `pixelforge/assets/fonts/` when packaging.
 - **Colours live only in `theme.py`** (`LIGHT` and `DARK` dicts). Don't hard-code colours in widgets; use stylesheet properties instead: `card="true"` on a QFrame for a card, `role="muted"` for secondary text, `variant="primary"|"secondary"` on buttons.
 - After changing a dynamic property at runtime, call `widgets.repolish(widget)` or the style won't update.
-- Layout follows Windows Settings: persistent left navigation, page heading, restrained settings rows, 6px card corners and neutral light/dark surfaces. Home has three tool rows. The Duplicates workspace retains `StepBar`, folder selector, one compact statistics strip, messages, workflow/review actions, and the empty/overview/sets tree stack. Gather shows only folder statistics, its own action row and the overview tree. Metadata has its own file selector and save controls. Progress sits below the page stack and is shared across tools. Navigation is allowed during work, but mutation controls are disabled globally until it finishes.
+- Layout follows Windows Settings: persistent left navigation, page heading, restrained settings rows, 6px card corners and neutral light/dark surfaces. Home has five tool rows and scrolls when needed. The Duplicates workspace retains `StepBar`, folder selector, one compact statistics strip, messages, workflow/review actions, and the empty/overview/sets tree stack. Gather shows only folder statistics, its own action row and the overview tree. Metadata has its own file selector and save controls. Rotation has separate folder selectors and an angle field. Conversion has its own scrollable controls and format selector. A shared progress panel sits below the page heading, above the page stack. It names the operation and shows processed counts/percentage when the worker reports totals; scans and metadata use indeterminate animation. It starts hidden, appears when work begins, and remains visible at 100% after completion. Failures stop the animation and display "stopped" without claiming completion. Navigation is allowed during work, but mutation controls are disabled globally until it finishes.
 - `MainWindow.refresh()` is the single place that sets the step, button states, which button is the accent (primary) one, stat cards and which stack page shows. Call it after any state change.
 - Keep all four duplicate-review buttons on one horizontal row: Keep selected, Keep suggested in all sets, Undo all, Open Duplicates folder.
 - Use plain text navigation and tree rows without decorative icons or emoji. Keep functional checkbox ticks and disclosure arrows.
@@ -178,7 +191,9 @@ Headless smoke testing works without a display:
 QT_QPA_PLATFORM=offscreen python your_test.py
 ```
 
-Run `python -m unittest discover -s tests -v` (use the venv interpreter). `tests/test_metadata.py` covers metadata stripping, pixel/transparency preservation, overwrite safety, failed saves, destination races and multi-frame rejection. `tests/test_ui.py` uses Qt offscreen and checks bundled fonts, page navigation, duplicate move/restart/review/undo, gathering and metadata save/cancel. UI tests patch confirmations, pump events and wait for both `busy` and `workers` to clear. Recycle Bin dispatch is stubbed against temporary fixtures in the review test.
+Run `python -m unittest discover -s tests -v` (use the venv interpreter). `tests/test_metadata.py` covers metadata stripping, pixel/transparency preservation, overwrite safety, failed saves, destination races and multi-frame rejection. `tests/test_rotation.py` compares saved pixels with the original SciPy algorithm and checks progress/logging, output safety, failure cleanup, top-level-only scanning, finite-angle validation and multi-frame rejection. `tests/test_ui.py` uses Qt offscreen and checks bundled fonts, page navigation, duplicate move/restart/review/undo, gathering, metadata save/cancel, empty-state layout and the rotation worker/controls. UI tests patch confirmations, pump events and wait for both `busy` and `workers` to clear. Recycle Bin dispatch is stubbed against temporary fixtures in the review test.
+
+`tests/test_conversion.py` checks all output formats, exact JPG quality-90 equivalence, recursive filtering, transparency, filename conflicts/races, verified saves before recycling, partial/corrupt/truncated output cleanup and continuing after failures. UI checks cover format selection, recursive conversion/progress and cancellation of recycling confirmation. Recycle Bin operations are mocked against temporary fixtures.
 
 ## 10. Roadmap (in rough priority order)
 

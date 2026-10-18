@@ -108,7 +108,7 @@ class MetadataPage(QWidget):
             if not destination.suffix:
                 destination = destination.with_suffix(self.source.suffix)
         self.result.hide()
-        self.window.set_busy(True)
+        self.window.set_busy(True, "Removing metadata")
         worker = MetadataWorker(self.source, destination, overwrite)
         worker.done.connect(self.on_done)
         self.window.run_worker(worker)

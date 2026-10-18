@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from pixelforge.core import duplicates, metadata, organizer, review, scanner
+from pixelforge.core import conversion, duplicates, metadata, organizer, review, rotation, scanner
 
 
 class Worker(QThread):
@@ -106,3 +106,43 @@ class MetadataWorker(Worker):
     def work(self):
         result = metadata.remove_metadata(self.source, self.destination, self.overwrite)
         self.done.emit(str(result))
+
+
+class RotationWorker(Worker):
+    done = Signal(list, list)
+
+    def __init__(self, input_dir: Path, output_dir: Path, angle: float):
+        super().__init__()
+        self.input_dir, self.output_dir, self.angle = input_dir, output_dir, angle
+
+    def work(self):
+        saved, errors = rotation.rotate_images(
+            self.input_dir, self.output_dir, self.angle, self.progress.emit
+        )
+        self.done.emit(saved, errors)
+
+
+class ConversionScanWorker(Worker):
+    done = Signal(list)
+
+    def __init__(self, directory: Path, output_format: str, recursive: bool):
+        super().__init__()
+        self.directory, self.output_format, self.recursive = directory, output_format, recursive
+
+    def work(self):
+        self.done.emit(conversion.files_to_convert(self.directory, self.output_format, self.recursive))
+
+
+class ConversionWorker(Worker):
+    done = Signal(list, int, list)
+
+    def __init__(self, files: list, directory: Path, output_format: str, delete_originals: bool):
+        super().__init__()
+        self.files, self.directory = files, directory
+        self.output_format, self.delete_originals = output_format, delete_originals
+
+    def work(self):
+        saved, recycled, errors = conversion.convert_images(
+            self.files, self.directory, self.output_format, self.delete_originals, self.progress.emit
+        )
+        self.done.emit(saved, recycled, errors)
