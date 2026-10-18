@@ -8,4 +8,5 @@ PySide6_Pdf==6.12.0.140
 PySide6_WebEngine==6.12.0.140
 PyWavelets==1.10.0
 scipy==1.18.1
+Send2Trash==2.1.0
 shiboken6==6.12.0
