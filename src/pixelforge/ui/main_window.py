@@ -2,10 +2,11 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QBrush, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
+    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -24,6 +26,7 @@ from pixelforge.core.duplicates import DuplicateGroup, human_size
 from pixelforge.core.log import duplicates_dir
 from pixelforge.core.organizer import files_to_gather
 from pixelforge.core.scanner import count_by_type, folder_stats
+from pixelforge.ui.widgets import ElidedLabel, StatCard, StepBar, repolish
 from pixelforge.ui.workers import (
     FindWorker,
     GatherWorker,
@@ -35,12 +38,21 @@ from pixelforge.ui.workers import (
 
 ROLE = Qt.ItemDataRole.UserRole
 YES = QMessageBox.StandardButton.Yes
+EMPTY, OVERVIEW, SETS = 0, 1, 2  # pages of the main stack
 
 
-def make_tree(headers: list[str]) -> QTreeWidget:
+def make_tree(headers: list[str], fit_columns: range) -> QTreeWidget:
     tree = QTreeWidget()
     tree.setHeaderLabels(headers)
-    tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+    tree.setAlternatingRowColors(True)
+    tree.setUniformRowHeights(True)
+    tree.setIndentation(20)
+    tree.setAnimated(True)
+    head = tree.header()
+    head.setStretchLastSection(False)
+    head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+    for col in fit_columns:
+        head.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
     return tree
 
 
@@ -48,7 +60,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PixelForge")
-        self.resize(1000, 700)
+        self.resize(1100, 760)
+        self.setMinimumSize(900, 620)
         self.folder: Path | None = None
         self.files: list[Path] = []
         self.groups: list[DuplicateGroup] = []  # found, not yet moved
@@ -58,86 +71,175 @@ class MainWindow(QMainWindow):
         self.flash = ""  # one-off result message
         self.workers: list = []
 
+        style = self.style()
+        self.dir_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        self.file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+
         central = QWidget()
+        central.setObjectName("root")
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(28, 22, 28, 22)
+        outer.setSpacing(14)
 
-        top = QHBoxLayout()
-        self.pick_btn = QPushButton("Choose folder…")
-        self.pick_btn.clicked.connect(self.choose_folder)
-        self.folder_label = QLabel("No folder selected")
-        self.folder_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        top.addWidget(self.pick_btn)
-        top.addWidget(self.folder_label, 1)
-        root.addLayout(top)
+        # Header
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        title = QLabel("PixelForge")
+        title.setObjectName("title")
+        subtitle = QLabel("Find duplicate photos and keep your folders tidy")
+        subtitle.setObjectName("subtitle")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        outer.addLayout(titles)
 
+        self.steps = StepBar()
+        outer.addWidget(self.steps)
+
+        # Folder card
+        folder_card = QFrame()
+        folder_card.setProperty("card", True)
+        fl = QHBoxLayout(folder_card)
+        fl.setContentsMargins(18, 14, 18, 14)
+        fl.setSpacing(14)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        cap = QLabel("Photo folder")
+        cap.setProperty("role", "muted")
+        self.folder_label = ElidedLabel("No folder selected")
+        col.addWidget(cap)
+        col.addWidget(self.folder_label)
+        fl.addLayout(col, 1)
         self.subfolders = QCheckBox("Include subfolders")
         self.subfolders.setChecked(True)
         self.subfolders.toggled.connect(self.rescan)
-        root.addWidget(self.subfolders)
+        self.pick_btn = self.button("Choose folder…", self.choose_folder, "primary")
+        fl.addWidget(self.subfolders)
+        fl.addWidget(self.pick_btn)
+        outer.addWidget(folder_card)
 
-        self.summary = QLabel("Choose a folder to begin.")
+        # Stat cards
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        self.card_images = StatCard("Images")
+        self.card_nested = StatCard("In subfolders")
+        self.card_sets = StatCard("Duplicate sets")
+        self.card_extra = StatCard("Extra copies")
+        for c in (self.card_images, self.card_nested, self.card_sets, self.card_extra):
+            stats.addWidget(c, 1)
+        outer.addLayout(stats)
+
+        # Messages
+        self.flash_label = QLabel()
+        self.flash_label.setObjectName("flash")
+        self.flash_label.setWordWrap(True)
+        self.flash_label.setVisible(False)
+        outer.addWidget(self.flash_label)
+        self.summary = QLabel()
+        self.summary.setObjectName("summary")
         self.summary.setWordWrap(True)
-        root.addWidget(self.summary)
+        self.summary.setVisible(False)
+        outer.addWidget(self.summary)
 
         # Bar 1: normal workflow
         self.find_bar = QWidget()
-        fl = QHBoxLayout(self.find_bar)
-        fl.setContentsMargins(0, 0, 0, 0)
-        self.check_btn = QPushButton("Find duplicates")
-        self.check_btn.clicked.connect(self.start_check)
-        self.move_btn = QPushButton("Move sets…")
-        self.move_btn.clicked.connect(self.start_move)
-        self.gather_btn = QPushButton("Gather into main folder…")
-        self.gather_btn.clicked.connect(self.start_gather)
+        fb = QHBoxLayout(self.find_bar)
+        fb.setContentsMargins(0, 0, 0, 0)
+        fb.setSpacing(10)
+        self.check_btn = self.button("Find duplicates", self.start_check)
+        self.move_btn = self.button("Move sets…", self.start_move)
+        self.gather_btn = self.button("Gather into main folder…", self.start_gather)
         self.remove_empty = QCheckBox("Remove empty folders afterwards")
         for w in (self.check_btn, self.move_btn, self.gather_btn):
-            fl.addWidget(w)
-        fl.addStretch()
-        fl.addWidget(self.remove_empty)
-        root.addWidget(self.find_bar)
+            fb.addWidget(w)
+        fb.addStretch()
+        fb.addWidget(self.remove_empty)
+        outer.addWidget(self.find_bar)
 
         # Bar 2: review of moved sets
         self.review_bar = QWidget()
-        rl = QHBoxLayout(self.review_bar)
-        rl.setContentsMargins(0, 0, 0, 0)
-        self.keep_btn = QPushButton("Keep selected copy…")
-        self.keep_btn.clicked.connect(self.start_keep_selected)
-        self.keep_all_btn = QPushButton("Keep suggested in all sets…")
-        self.keep_all_btn.clicked.connect(self.start_keep_all)
-        self.undo_btn = QPushButton("Undo all…")
-        self.undo_btn.clicked.connect(self.start_undo)
-        self.open_btn = QPushButton("Open Duplicates folder")
-        self.open_btn.clicked.connect(self.open_duplicates)
-        for w in (self.keep_btn, self.keep_all_btn, self.undo_btn, self.open_btn):
-            rl.addWidget(w)
-        rl.addStretch()
-        root.addWidget(self.review_bar)
+        rb = QHBoxLayout(self.review_bar)
+        rb.setContentsMargins(0, 0, 0, 0)
+        rb.setSpacing(10)
+        self.keep_btn = self.button(
+            "Keep selected copy…", self.start_keep_selected, "primary"
+        )
+        self.keep_all_btn = self.button(
+            "Keep suggested in all sets…", self.start_keep_all
+        )
+        self.undo_btn = self.button("Undo all…", self.start_undo)
+        self.open_btn = self.button("Open Duplicates folder", self.open_duplicates)
+        for w in (self.keep_btn, self.keep_all_btn, self.undo_btn):
+            rb.addWidget(w)
+        rb.addStretch()
+        rb.addWidget(self.open_btn)
+        outer.addWidget(self.review_bar)
 
         self.progress = QProgressBar()
-        root.addWidget(self.progress)
+        self.progress.setTextVisible(False)
+        outer.addWidget(self.progress)
 
-        self.overview_tree = make_tree(["Folder", "Images", "Types"])
+        # Main area: empty state / folder overview / duplicate sets
+        empty = QWidget()
+        el = QVBoxLayout(empty)
+        el.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_title = QLabel()
+        self.empty_title.setObjectName("emptyTitle")
+        self.empty_text = QLabel()
+        self.empty_text.setObjectName("emptyText")
+        self.empty_text.setWordWrap(True)
+        self.empty_text.setMaximumWidth(460)
+        for lab in (self.empty_title, self.empty_text):
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            el.addWidget(lab, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.overview_tree = make_tree(["Folder", "Images", "Types"], range(1, 3))
+        self.overview_tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         self.sets_tree = make_tree(
-            ["File", "Resolution", "Size", "Date taken", "From folder", "Note"]
+            ["File", "Resolution", "Size", "Date taken", "From folder", "Note"],
+            range(1, 6),
         )
         self.sets_tree.itemSelectionChanged.connect(self.refresh)
         self.stack = QStackedWidget()
+        self.stack.addWidget(empty)
         self.stack.addWidget(self.overview_tree)
         self.stack.addWidget(self.sets_tree)
-        root.addWidget(self.stack, 1)
+        outer.addWidget(self.stack, 1)
 
         self.refresh()
+
+    # ---- small helpers --------------------------------------------------
+    def button(self, text: str, slot, variant: str = "secondary") -> QPushButton:
+        b = QPushButton(text)
+        b.setProperty("variant", variant)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(slot)
+        return b
+
+    @staticmethod
+    def set_variant(btn: QPushButton, variant: str):
+        if btn.property("variant") != variant:
+            btn.setProperty("variant", variant)
+            repolish(btn)
+
+    def set_summary(self, text: str):
+        self.summary.setText(text)
+        self.summary.setVisible(bool(text))
+
+    def show_flash(self, text: str):
+        self.flash_label.setText(text)
+        self.flash_label.setVisible(bool(text))
 
     # ---- UI state -------------------------------------------------------
     def refresh(self):
         reviewing = bool(self.pending)
+        ok = not self.busy
+        step = 3 if reviewing else 2 if self.groups else 1 if self.files else 0
+        self.steps.set_current(step)
+
         self.find_bar.setVisible(not reviewing)
         self.review_bar.setVisible(reviewing)
         self.progress.setVisible(self.busy)
-        ok = not self.busy
         self.pick_btn.setEnabled(ok)
         self.check_btn.setEnabled(ok and bool(self.files))
         self.move_btn.setEnabled(ok and bool(self.groups))
@@ -145,12 +247,60 @@ class MainWindow(QMainWindow):
         self.keep_btn.setEnabled(ok and bool(self.sets_tree.selectedItems()))
         for b in (self.keep_all_btn, self.undo_btn, self.open_btn):
             b.setEnabled(ok)
-        self.stack.setCurrentWidget(
-            self.sets_tree if (self.pending or self.groups) else self.overview_tree
+        # The next sensible action gets the accent colour.
+        self.set_variant(self.pick_btn, "primary" if step == 0 else "secondary")
+        self.set_variant(self.check_btn, "primary" if step == 1 else "secondary")
+        self.set_variant(self.move_btn, "primary" if step == 2 else "secondary")
+
+        self.update_stats(reviewing)
+        if not self.files and not self.pending:
+            if not self.folder:
+                self.empty_title.setText("Choose a folder to get started")
+                self.empty_text.setText(
+                    "PixelForge finds duplicate photos, puts each set side by "
+                    "side so you can pick the best copy, and keeps your "
+                    "folders tidy."
+                )
+            elif self.busy:
+                self.empty_title.setText("Scanning…")
+                self.empty_text.setText("")
+            else:
+                self.empty_title.setText("No images found")
+                self.empty_text.setText(
+                    "Try including subfolders, or choose a different folder."
+                )
+            self.stack.setCurrentIndex(EMPTY)
+        else:
+            self.stack.setCurrentIndex(
+                SETS if (self.pending or self.groups) else OVERVIEW
+            )
+
+    def update_stats(self, reviewing: bool):
+        if self.folder:
+            self.card_images.set_value(
+                "…" if self.busy and not self.files else str(len(self.files))
+            )
+            self.card_nested.set_value(str(self.nested))
+        else:
+            self.card_images.set_value("–")
+            self.card_nested.set_value("–")
+        sets = (
+            [len(s["files"]) for s in self.pending]
+            if reviewing
+            else [len(g.files) for g in self.groups]
         )
+        if sets:
+            self.card_sets.set_value(
+                str(len(sets)), "Sets to review" if reviewing else "Duplicate sets"
+            )
+            self.card_extra.set_value(str(sum(n - 1 for n in sets)))
+        else:
+            self.card_sets.set_value("–", "Duplicate sets")
+            self.card_extra.set_value("–")
 
     def set_busy(self, indeterminate: bool):
         self.busy = True
+        self.show_flash("")
         (
             self.progress.setRange(0, 0)
             if indeterminate
@@ -198,14 +348,14 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Select photo folder")
         if path:
             self.folder = Path(path)
-            self.folder_label.setText(str(self.folder))
+            self.folder_label.set_full_text(str(self.folder))
             self.rescan()
 
     def rescan(self):
         if not self.folder:
             return
         self.files, self.groups, self.pending, self.nested = [], [], [], 0
-        self.summary.setText("Scanning folder…")
+        self.set_summary("")
         self.set_busy(True)
         w = ScanWorker(self.folder, self.subfolders.isChecked())
         w.done.connect(self.on_scanned)
@@ -219,21 +369,19 @@ class MainWindow(QMainWindow):
             self.fill_sets(self.review_sets())
             n = sum(len(s["files"]) for s in pending)
             text = (
-                f"{len(pending)} duplicate sets ({n} files) are waiting in the Duplicates folder.\n"
+                f"{len(pending)} duplicate sets ({n} files) are waiting in the Duplicates folder. "
                 "For each set, choose the copy to keep: it goes back to its original folder and "
                 "the others go to the Recycle Bin. Or undo everything."
             )
         elif files:
             parts = "  ·  ".join(
-                f"{k.upper()}: {v}" for k, v in count_by_type(files).items()
+                f"{k.upper()} {v}" for k, v in count_by_type(files).items()
             )
-            text = (
-                f"Found {len(files)} images — {parts}\n{self.nested} are inside subfolders.\n"
-                "Click “Find duplicates” to continue."
-            )
+            text = f"{parts}.  Click “Find duplicates” to continue."
         else:
-            text = "No images found in this folder."
-        self.summary.setText((self.flash + "\n\n" if self.flash else "") + text)
+            text = ""
+        self.set_summary(text)
+        self.show_flash(self.flash)
         self.flash = ""
         self.set_idle()
 
@@ -255,13 +403,17 @@ class MainWindow(QMainWindow):
                     "  ·  ".join(f"{k.upper()} {v}" for k, v in counts.items()),
                 ],
             )
+            item.setIcon(0, self.dir_icon)
+            item.setTextAlignment(
+                1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
             items[folder] = item
             item.setExpanded(True)
 
     # ---- Step 3: find duplicates ----------------------------------------
     def start_check(self):
         self.groups = []
-        self.summary.setText("Looking for duplicates…")
+        self.set_summary("Looking for duplicates…")
         self.set_busy(False)
         w = FindWorker(self.files)
         w.progress.connect(self.on_progress)
@@ -274,13 +426,13 @@ class MainWindow(QMainWindow):
             self.fill_sets(self.found_sets())
             n = sum(len(g.files) for g in groups)
             size = human_size(sum(i.size_bytes for g in groups for i in g.files))
-            self.summary.setText(
-                f"Found {len(groups)} sets of duplicates — {n} files ({size}).\n"
-                "Click “Move sets…” to move every copy of each set into its own folder "
-                "inside Duplicates, where you can compare them and choose which to keep."
+            self.set_summary(
+                f"Found {len(groups)} sets of duplicates ({n} files, {size}). Click “Move sets…” "
+                "to move every copy of each set into its own folder inside Duplicates, "
+                "where you can compare them and choose which to keep."
             )
         else:
-            self.summary.setText("No duplicates found.")
+            self.set_summary("No duplicates found.")
         self.set_idle()
 
     # ---- Step 4: move sets ----------------------------------------------
@@ -443,10 +595,17 @@ class MainWindow(QMainWindow):
     def fill_sets(self, sets: list):
         tree = self.sets_tree
         tree.clear()
+        accent = QBrush(self.palette().color(QPalette.ColorRole.Highlight))
         for set_name, rows in sets:
-            top = QTreeWidgetItem(tree, [f"{set_name} — {len(rows)} identical copies"])
+            top = QTreeWidgetItem(
+                tree, [f"{set_name}  ·  {len(rows)} identical copies"]
+            )
+            top.setIcon(0, self.dir_icon)
             top.setFirstColumnSpanned(True)
             top.setData(0, ROLE, (set_name, None))
+            font = top.font(0)
+            font.setBold(True)
+            top.setFont(0, font)
             for key, name, res, size, date, folder, suggested in rows:
                 item = QTreeWidgetItem(
                     top,
@@ -459,8 +618,11 @@ class MainWindow(QMainWindow):
                         "Suggested to keep" if suggested else "",
                     ],
                 )
+                item.setIcon(0, self.file_icon)
                 item.setData(0, ROLE, (set_name, key))
                 item.setToolTip(0, key)
+                if suggested:
+                    item.setForeground(5, accent)
         if len(sets) <= 200:
             tree.expandAll()
 
