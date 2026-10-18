@@ -4,6 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QBrush, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QFrame,
@@ -15,7 +16,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QStackedWidget,
-    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -26,6 +26,7 @@ from pixelforge.core.duplicates import DuplicateGroup, human_size
 from pixelforge.core.log import duplicates_dir
 from pixelforge.core.organizer import files_to_gather
 from pixelforge.core.scanner import count_by_type, folder_stats
+from pixelforge.ui.metadata_page import MetadataPage
 from pixelforge.ui.widgets import ElidedLabel, StatCard, StepBar, repolish
 from pixelforge.ui.workers import (
     FindWorker,
@@ -60,8 +61,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PixelForge")
-        self.resize(1100, 760)
-        self.setMinimumSize(900, 620)
+        self.resize(1280, 820)
+        self.setMinimumSize(1040, 700)
         self.folder: Path | None = None
         self.files: list[Path] = []
         self.groups: list[DuplicateGroup] = []  # found, not yet moved
@@ -70,28 +71,74 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.flash = ""  # one-off result message
         self.workers: list = []
-
-        style = self.style()
-        self.dir_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        self.file_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        self.page = "home"
 
         central = QWidget()
         central.setObjectName("root")
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(28, 22, 28, 22)
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(232)
+        nav = QVBoxLayout(sidebar)
+        nav.setContentsMargins(16, 30, 16, 20)
+        nav.setSpacing(6)
+        brand = QLabel("PixelForge")
+        brand.setObjectName("brand")
+        nav.addWidget(brand)
+        tagline = QLabel("Your image tools")
+        tagline.setProperty("role", "muted")
+        nav.addWidget(tagline)
+        nav.addSpacing(30)
+        self.navigation = QButtonGroup(self)
+        self.nav_buttons = {}
+        pages = [
+            ("home", "Home"),
+            ("duplicates", "Duplicates"),
+            ("gather", "Gather images"),
+            ("metadata", "Remove metadata"),
+        ]
+        for key, name in pages:
+            button = self.button(name, lambda checked=False, p=key: self.show_page(p))
+            button.setProperty("navigation", True)
+            button.setCheckable(True)
+            self.navigation.addButton(button)
+            self.nav_buttons[key] = button
+            nav.addWidget(button)
+        nav.addStretch()
+        local = QLabel("Images stay on your computer")
+        local.setProperty("role", "muted")
+        local.setWordWrap(True)
+        nav.addWidget(local)
+        shell.addWidget(sidebar)
+
+        content = QVBoxLayout()
+        content.setContentsMargins(36, 30, 36, 28)
+        content.setSpacing(20)
+        shell.addLayout(content, 1)
+        breadcrumb = QLabel("PixelForge  /  Image tools")
+        breadcrumb.setProperty("role", "muted")
+        content.addWidget(breadcrumb)
+        self.page_title = QLabel("Home")
+        self.page_title.setObjectName("title")
+        content.addWidget(self.page_title)
+        self.pages = QStackedWidget()
+        content.addWidget(self.pages, 1)
+
+        self.home_page = self.make_home()
+        self.pages.addWidget(self.home_page)
+        self.workspace = QWidget()
+        self.pages.addWidget(self.workspace)
+        outer = QVBoxLayout(self.workspace)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(14)
 
-        # Header
-        titles = QVBoxLayout()
-        titles.setSpacing(0)
-        title = QLabel("PixelForge")
-        title.setObjectName("title")
-        subtitle = QLabel("Find duplicate photos and keep your folders tidy")
-        subtitle.setObjectName("subtitle")
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        outer.addLayout(titles)
+        self.workspace_description = QLabel()
+        self.workspace_description.setProperty("role", "muted")
+        self.workspace_description.setWordWrap(True)
+        outer.addWidget(self.workspace_description)
 
         self.steps = StepBar()
         outer.addWidget(self.steps)
@@ -119,7 +166,10 @@ class MainWindow(QMainWindow):
         outer.addWidget(folder_card)
 
         # Stat cards
-        stats = QHBoxLayout()
+        self.stats = QFrame()
+        self.stats.setProperty("card", True)
+        stats = QHBoxLayout(self.stats)
+        stats.setContentsMargins(0, 0, 0, 0)
         stats.setSpacing(12)
         self.card_images = StatCard("Images")
         self.card_nested = StatCard("In subfolders")
@@ -127,7 +177,7 @@ class MainWindow(QMainWindow):
         self.card_extra = StatCard("Extra copies")
         for c in (self.card_images, self.card_nested, self.card_sets, self.card_extra):
             stats.addWidget(c, 1)
-        outer.addLayout(stats)
+        outer.addWidget(self.stats)
 
         # Messages
         self.flash_label = QLabel()
@@ -141,6 +191,11 @@ class MainWindow(QMainWindow):
         self.summary.setVisible(False)
         outer.addWidget(self.summary)
 
+        self.gather_hint = QLabel()
+        self.gather_hint.setWordWrap(True)
+        self.gather_hint.setProperty("role", "muted")
+        outer.addWidget(self.gather_hint)
+
         # Bar 1: normal workflow
         self.find_bar = QWidget()
         fb = QHBoxLayout(self.find_bar)
@@ -150,11 +205,19 @@ class MainWindow(QMainWindow):
         self.move_btn = self.button("Move sets…", self.start_move)
         self.gather_btn = self.button("Gather into main folder…", self.start_gather)
         self.remove_empty = QCheckBox("Remove empty folders afterwards")
-        for w in (self.check_btn, self.move_btn, self.gather_btn):
+        for w in (self.check_btn, self.move_btn):
             fb.addWidget(w)
         fb.addStretch()
-        fb.addWidget(self.remove_empty)
         outer.addWidget(self.find_bar)
+
+        self.gather_bar = QFrame()
+        self.gather_bar.setProperty("card", True)
+        gb = QVBoxLayout(self.gather_bar)
+        gb.setContentsMargins(18, 16, 18, 16)
+        gb.setSpacing(14)
+        gb.addWidget(self.remove_empty)
+        gb.addWidget(self.gather_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        outer.addWidget(self.gather_bar)
 
         # Bar 2: review of moved sets
         self.review_bar = QWidget()
@@ -169,15 +232,14 @@ class MainWindow(QMainWindow):
         )
         self.undo_btn = self.button("Undo all…", self.start_undo)
         self.open_btn = self.button("Open Duplicates folder", self.open_duplicates)
-        for w in (self.keep_btn, self.keep_all_btn, self.undo_btn):
+        for w in (self.keep_btn, self.keep_all_btn, self.undo_btn, self.open_btn):
             rb.addWidget(w)
         rb.addStretch()
-        rb.addWidget(self.open_btn)
         outer.addWidget(self.review_bar)
 
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
-        outer.addWidget(self.progress)
+        content.addWidget(self.progress)
 
         # Main area: empty state / folder overview / duplicate sets
         empty = QWidget()
@@ -191,7 +253,7 @@ class MainWindow(QMainWindow):
         self.empty_text.setMaximumWidth(460)
         for lab in (self.empty_title, self.empty_text):
             lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            el.addWidget(lab, 0, Qt.AlignmentFlag.AlignCenter)
+            el.addWidget(lab)
 
         self.overview_tree = make_tree(["Folder", "Images", "Types"], range(1, 3))
         self.overview_tree.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
@@ -206,6 +268,64 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.sets_tree)
         outer.addWidget(self.stack, 1)
 
+        self.metadata_page = MetadataPage(self)
+        self.pages.addWidget(self.metadata_page)
+        self.show_page("home")
+
+    def make_home(self):
+        home = QWidget()
+        layout = QVBoxLayout(home)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        intro = QLabel("A few useful tools for your photo folders. Choose one to get started.")
+        intro.setWordWrap(True)
+        intro.setProperty("role", "muted")
+        layout.addWidget(intro)
+        layout.addSpacing(16)
+        for key, name, detail in (
+            ("duplicates", "Duplicates", "Find identical images, compare copies and choose what to keep."),
+            ("gather", "Gather images", "Bring images from subfolders into one main folder."),
+            ("metadata", "Remove metadata", "Save an image without embedded camera, location or other details."),
+        ):
+            row = self.button("", lambda checked=False, p=key: self.show_page(p))
+            row.setProperty("toolRow", True)
+            row.setMinimumHeight(92)
+            row.setAccessibleName(name)
+            row.setAccessibleDescription(detail)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(22, 18, 22, 18)
+            row_layout.setSpacing(18)
+            text = QVBoxLayout()
+            text.setSpacing(4)
+            heading = QLabel(name)
+            heading.setProperty("role", "toolTitle")
+            description = QLabel(detail)
+            description.setWordWrap(True)
+            description.setProperty("role", "muted")
+            text.addWidget(heading)
+            text.addWidget(description)
+            row_layout.addLayout(text, 1)
+            arrow = QLabel("›")
+            arrow.setProperty("role", "chevron")
+            row_layout.addWidget(arrow)
+            for label in (heading, description, arrow):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            layout.addWidget(row)
+        layout.addStretch()
+        return home
+
+    def show_page(self, page: str):
+        self.page = page
+        titles = {
+            "home": "Home", "duplicates": "Duplicates",
+            "gather": "Gather images", "metadata": "Remove metadata",
+        }
+        self.page_title.setText(titles[page])
+        self.nav_buttons[page].setChecked(True)
+        self.nav_buttons[page].setFocus(Qt.FocusReason.OtherFocusReason)
+        self.pages.setCurrentWidget(
+            self.home_page if page == "home" else self.metadata_page if page == "metadata" else self.workspace
+        )
         self.refresh()
 
     # ---- small helpers --------------------------------------------------
@@ -233,17 +353,36 @@ class MainWindow(QMainWindow):
     # ---- UI state -------------------------------------------------------
     def refresh(self):
         reviewing = bool(self.pending)
+        duplicates = self.page == "duplicates"
+        gather = self.page == "gather"
         ok = not self.busy
         step = 3 if reviewing else 2 if self.groups else 1 if self.files else 0
         self.steps.set_current(step)
 
-        self.find_bar.setVisible(not reviewing)
-        self.review_bar.setVisible(reviewing)
+        self.steps.setVisible(duplicates)
+        self.find_bar.setVisible(duplicates and not reviewing)
+        self.review_bar.setVisible(duplicates and reviewing)
+        self.gather_bar.setVisible(gather)
+        self.gather_hint.setVisible(gather)
+        self.summary.setVisible(duplicates and bool(self.summary.text()))
+        self.card_sets.setVisible(duplicates)
+        self.card_extra.setVisible(duplicates)
+        self.workspace_description.setText(
+            "Find exact duplicates and review each set before choosing a copy to keep."
+            if duplicates else "Move images from subfolders into one place."
+        )
+        self.gather_hint.setText(
+            "Finish reviewing or undo the pending duplicate sets in Duplicates before gathering images."
+            if reviewing else "Images in subfolders will move into the chosen folder. Duplicate filenames get a numbered suffix."
+        )
         self.progress.setVisible(self.busy)
         self.pick_btn.setEnabled(ok)
+        self.subfolders.setEnabled(ok)
+        self.remove_empty.setEnabled(ok)
         self.check_btn.setEnabled(ok and bool(self.files))
         self.move_btn.setEnabled(ok and bool(self.groups))
-        self.gather_btn.setEnabled(ok and self.nested > 0)
+        self.gather_btn.setEnabled(ok and self.nested > 0 and not reviewing)
+        self.metadata_page.refresh()
         self.keep_btn.setEnabled(ok and bool(self.sets_tree.selectedItems()))
         for b in (self.keep_all_btn, self.undo_btn, self.open_btn):
             b.setEnabled(ok)
@@ -257,9 +396,7 @@ class MainWindow(QMainWindow):
             if not self.folder:
                 self.empty_title.setText("Choose a folder to get started")
                 self.empty_text.setText(
-                    "PixelForge finds duplicate photos, puts each set side by "
-                    "side so you can pick the best copy, and keeps your "
-                    "folders tidy."
+                    "Choose the photo folder you want to work with. You can include its subfolders too."
                 )
             elif self.busy:
                 self.empty_title.setText("Scanning…")
@@ -272,7 +409,7 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentIndex(EMPTY)
         else:
             self.stack.setCurrentIndex(
-                SETS if (self.pending or self.groups) else OVERVIEW
+                SETS if duplicates and (self.pending or self.groups) else OVERVIEW
             )
 
     def update_stats(self, reviewing: bool):
@@ -403,7 +540,6 @@ class MainWindow(QMainWindow):
                     "  ·  ".join(f"{k.upper()} {v}" for k, v in counts.items()),
                 ],
             )
-            item.setIcon(0, self.dir_icon)
             item.setTextAlignment(
                 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
@@ -600,7 +736,6 @@ class MainWindow(QMainWindow):
             top = QTreeWidgetItem(
                 tree, [f"{set_name}  ·  {len(rows)} identical copies"]
             )
-            top.setIcon(0, self.dir_icon)
             top.setFirstColumnSpanned(True)
             top.setData(0, ROLE, (set_name, None))
             font = top.font(0)
@@ -618,7 +753,6 @@ class MainWindow(QMainWindow):
                         "Suggested to keep" if suggested else "",
                     ],
                 )
-                item.setIcon(0, self.file_icon)
                 item.setData(0, ROLE, (set_name, key))
                 item.setToolTip(0, key)
                 if suggested:

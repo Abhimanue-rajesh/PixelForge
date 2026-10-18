@@ -4,7 +4,7 @@ Read this before changing anything. Update it when you change behaviour, structu
 
 ## 1. What this project is
 
-PixelForge is a **native-feeling Windows desktop app** for managing large photo folders: finding duplicate images, moving them somewhere reviewable, and (planned) renaming and sorting photos by date. It is meant to be **installed by other, non-technical users**, so it must feel like a normal Windows program with a safe, undo-able workflow.
+PixelForge is a **native-feeling Windows desktop image toolkit**. Home links to separate Duplicates, Gather images and Remove metadata pages. Duplicate finding is one feature, not the app's main identity. Date-based renaming and sorting are planned. It is meant to be **installed by other, non-technical users**, so it must feel like a normal Windows program with a safe, undo-able workflow.
 
 - Language: Python 3.10+
 - UI: **PySide6 (Qt)**
@@ -26,16 +26,19 @@ PixelForge/
 ├── .gitignore              .venv/, venv/, __pycache__/, build/, dist/, *.spec
 └── src/pixelforge/
     ├── main.py             QApplication + MainWindow; exposes run()
+    ├── assets/fonts/       bundled Poppins Regular/Medium/SemiBold + OFL.txt
     ├── core/               NO Qt imports allowed here
     │   ├── scanner.py      find image files, count by type, per-folder stats
     │   ├── duplicates.py   hashing, find sets, naming, move_sets()
     │   ├── log.py          read/write the move log (pixelforge_log.json)
     │   ├── review.py       pending_sets(), resolve_sets() (keep one), undo_all()
     │   ├── organizer.py    gather images from subfolders into the main folder
+    │   ├── metadata.py     rebuild a still image from pixels, safely save or overwrite
     │   ├── dates.py        PLACEHOLDER from initial skeleton (rename/sort by date, not built)
     │   └── history.py      PLACEHOLDER from initial skeleton (undo lives in log.py/review.py now)
     └── ui/
         ├── main_window.py  the single main window and all workflow logic
+        ├── metadata_page.py separate single-image metadata tool
         ├── workers.py      QThread wrappers around core functions
         ├── theme.py        stylesheet + light/dark palettes (follows the Windows setting)
         └── widgets.py      StatCard, StepBar, ElidedLabel, repolish()
@@ -62,7 +65,8 @@ PixelForge/
    - **Keep suggested in all sets…** same, for every set, using the suggested copy.
    - **Undo all…** every file goes back exactly where it came from.
    - **Open Duplicates folder** opens it in Explorer.
-6. **Gather into main folder…** (separate tool, shown when not reviewing): moves images from subfolders into the chosen folder; optional "Remove empty folders afterwards".
+6. **Gather images** (separate sidebar page, disabled while duplicate sets await review): moves images from subfolders into the chosen folder; optional "Remove empty folders afterwards". Duplicates and Gather share the selected folder and scan state; navigating does not reset a workflow.
+7. **Remove metadata** (independent sidebar page): choose one image, then save a clean copy by default. An explicit checkbox and confirmation enable overwriting that original. The original script's pixel-recreation approach is retained; no EXIF rotation is applied. Supported extensions: JPEG, PNG, WebP, BMP, TIFF. Reject multi-frame images to avoid dropping frames. Indexed images convert to RGBA to preserve palette colours and transparency; WebP saves losslessly. JPEG re-encodes and rotation/colour-profile removal can affect appearance. Temporary encoding completes before replacing an original; save-as uses exclusive creation and never overwrites an existing destination. Metadata overwrite has no undo, as explicitly requested by the owner's script. Runs via `MetadataWorker`; rescans the shared photo folder after success when one is selected.
 
 ## 5. Key decisions and why
 
@@ -143,15 +147,20 @@ Location: `<root>/Duplicates/pixelforge_log.json`. Format (version 2):
 **core/organizer.py**
 - `files_to_gather(files, root)`, `gather_files(files, root, progress=None, remove_empty=False) -> (moved, errors, removed_dirs)`, `remove_empty_folders(root)` (uses `rmdir`, so only truly empty folders go)
 
-**ui/main_window.py**: `MainWindow`. State: `folder, files, groups (found, not moved), pending (moved, awaiting review), nested, busy, flash, workers`. `refresh()` is the single place that decides button visibility/enabled state and which tree is shown (overview tree vs sets tree). `flash` is a one-shot result message shown above the summary after the next rescan.
+**core/metadata.py**: `remove_metadata(source, destination, overwrite=False) -> Path`. Core has no Qt imports; errors propagate to the worker. Overwrite only permits replacing the source itself. The destination extension must match the source; same-folder temporary files are cleaned up on success and failure.
+
+**ui/main_window.py**: `MainWindow`. State: `page, folder, files, groups (found, not moved), pending (moved, awaiting review), nested, busy, flash, workers`. `show_page()` selects Home, the shared Duplicates/Gather workspace, or MetadataPage. `refresh()` decides button visibility/enabled state and which tree is shown (overview tree vs sets tree). `flash` is a one-shot result message shown above the summary after the next rescan.
 
 ## 8b. UI design system
 
-- `main.py` sets the **Fusion** style, then `theme.apply_theme(app)` installs one app-wide stylesheet and palette. It re-applies automatically when Windows switches light/dark (Qt 6.5+).
+- `main.py` sets the **Fusion** style, registers bundled **Poppins** via `theme.load_fonts(app)`, then `theme.apply_theme(app)` installs one app-wide stylesheet and palette. It re-applies automatically when Windows switches light/dark (Qt 6.5+). Font files and their license must ship in `pixelforge/assets/fonts/` when packaging.
 - **Colours live only in `theme.py`** (`LIGHT` and `DARK` dicts). Don't hard-code colours in widgets; use stylesheet properties instead: `card="true"` on a QFrame for a card, `role="muted"` for secondary text, `variant="primary"|"secondary"` on buttons.
 - After changing a dynamic property at runtime, call `widgets.repolish(widget)` or the style won't update.
-- Layout of the window, top to bottom: header, `StepBar` (Choose folder → Find duplicates → Move sets → Review), folder card, four `StatCard`s, success banner (`flash_label`) and summary text, one action bar (workflow bar or review bar), slim progress bar, then a stack: empty state / folder overview tree / duplicate sets tree.
+- Layout follows Windows Settings: persistent left navigation, page heading, restrained settings rows, 6px card corners and neutral light/dark surfaces. Home has three tool rows. The Duplicates workspace retains `StepBar`, folder selector, one compact statistics strip, messages, workflow/review actions, and the empty/overview/sets tree stack. Gather shows only folder statistics, its own action row and the overview tree. Metadata has its own file selector and save controls. Progress sits below the page stack and is shared across tools. Navigation is allowed during work, but mutation controls are disabled globally until it finishes.
 - `MainWindow.refresh()` is the single place that sets the step, button states, which button is the accent (primary) one, stat cards and which stack page shows. Call it after any state change.
+- Keep all four duplicate-review buttons on one horizontal row: Keep selected, Keep suggested in all sets, Undo all, Open Duplicates folder.
+- Use plain text navigation and tree rows without decorative icons or emoji. Keep functional checkbox ticks and disclosure arrows.
+- Empty-state labels share their layout width; center their text rather than each widget individually so wrapped descriptions receive their required height.
 - The checkbox tick image is generated at runtime into the system temp folder (`pixelforge/check_*.png`), so no data files need bundling for packaging.
 
 ## 9. Running and testing
@@ -169,7 +178,7 @@ Headless smoke testing works without a display:
 QT_QPA_PLATFORM=offscreen python your_test.py
 ```
 
-The previous end-to-end test patched `QMessageBox.question/warning/critical`, set `win.folder`, called `win.rescan()`, `start_check()`, `start_move()`, `start_keep_selected()`, `start_undo()`, and waited on `win.busy` while pumping `app.processEvents()`. Reuse that pattern for regression tests. There is no formal test suite in the repo yet; adding `tests/` with pytest for `core/` would be welcome.
+Run `python -m unittest discover -s tests -v` (use the venv interpreter). `tests/test_metadata.py` covers metadata stripping, pixel/transparency preservation, overwrite safety, failed saves, destination races and multi-frame rejection. `tests/test_ui.py` uses Qt offscreen and checks bundled fonts, page navigation, duplicate move/restart/review/undo, gathering and metadata save/cancel. UI tests patch confirmations, pump events and wait for both `busy` and `workers` to clear. Recycle Bin dispatch is stubbed against temporary fixtures in the review test.
 
 ## 10. Roadmap (in rough priority order)
 
@@ -180,7 +189,7 @@ The previous end-to-end test patched `QMessageBox.question/warning/critical`, se
 5. **Cancel button** for long operations.
 6. **Packaging:** PyInstaller folder mode, then an Inno Setup installer (Start Menu shortcut, uninstaller). Expect an installer of roughly 80–150 MB. Unsigned apps trigger a Windows SmartScreen warning ("More info", then "Run anyway"); fixing it needs a paid code-signing certificate.
 7. **HEIC support** (iPhone photos) would need `pillow-heif`; not included in `IMAGE_EXTENSIONS` today.
-8. Tests (pytest) for `core/`.
+8. Expand core regression coverage beyond the existing unittest metadata/UI checks.
 
 ## 11. Conventions for agents working here
 

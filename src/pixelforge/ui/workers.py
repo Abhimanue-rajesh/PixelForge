@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from pixelforge.core import duplicates, organizer, review, scanner
+from pixelforge.core import duplicates, metadata, organizer, review, scanner
 
 
 class Worker(QThread):
@@ -94,3 +94,15 @@ class GatherWorker(Worker):
             self.files, self.root, self.progress.emit, self.remove_empty
         )
         self.done.emit(moved, errors, removed)
+
+
+class MetadataWorker(Worker):
+    done = Signal(str)
+
+    def __init__(self, source: Path, destination: Path, overwrite: bool):
+        super().__init__()
+        self.source, self.destination, self.overwrite = source, destination, overwrite
+
+    def work(self):
+        result = metadata.remove_metadata(self.source, self.destination, self.overwrite)
+        self.done.emit(str(result))

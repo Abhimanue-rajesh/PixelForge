@@ -13,7 +13,6 @@ class StatCard(QFrame):
 
     def __init__(self, caption: str):
         super().__init__()
-        self.setProperty("card", True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 14, 18, 14)
         lay.setSpacing(0)
@@ -56,7 +55,7 @@ class StepBar(QFrame):
     def set_current(self, index: int) -> None:
         for i, (lab, name) in enumerate(zip(self.labels, self.STEPS)):
             state = "done" if i < index else "current" if i == index else "todo"
-            lab.setText(f"✓  {name}" if state == "done" else f"{i + 1}  {name}")
+            lab.setText(f"{i + 1}  {name}")
             if lab.property("step") != state:
                 lab.setProperty("step", state)
                 repolish(lab)
