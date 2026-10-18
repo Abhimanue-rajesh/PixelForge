@@ -10,7 +10,7 @@ PixelForge is a **native-feeling Windows desktop image toolkit**. Home links to 
 - UI: **PySide6 (Qt)**
 - Image handling: Pillow (`PIL`); rotation uses `imageio.v2` (`imageio==2.38.1`, added for the supplied script) and the existing SciPy/NumPy dependencies. `imagehash` is installed but **not used yet** (reserved for similar-image detection).
 - Recycle Bin: `send2trash`
-- Packaging (planned, not done): PyInstaller in **folder mode** (not `--onefile`) + Inno Setup `Setup.exe`
+- Packaging: checked-in `PixelForge.spec` builds a **portable Windows folder** with PyInstaller (not `--onefile`). An Inno Setup `Setup.exe` installer is still planned.
 - Target OS: Windows (code is cross-platform Python, so it can be tested on Linux/macOS headless)
 
 The owner started from a separate repo of loose scripts (`ImageManipulationScripts`, ML-oriented). PixelForge is a **new, separate repo**; it does not depend on those scripts.
@@ -23,7 +23,8 @@ PixelForge/
 ├── requirements.txt        PySide6, pillow, imagehash, imageio, scipy, numpy, send2trash
 ├── setup.cfg
 ├── README.md
-├── .gitignore              .venv/, venv/, __pycache__/, build/, dist/, *.spec
+├── PixelForge.spec         src import path, bundled assets and imageio distribution metadata
+├── .gitignore              .venv/, venv/, __pycache__/, build/, dist/, *.spec except PixelForge.spec
 └── src/pixelforge/
     ├── main.py             QApplication + MainWindow; exposes run()
     ├── assets/fonts/       bundled Poppins Regular/Medium/SemiBold + OFL.txt
@@ -195,6 +196,17 @@ Run `python -m unittest discover -s tests -v` (use the venv interpreter). `tests
 
 `tests/test_conversion.py` checks all output formats, exact JPG quality-90 equivalence, recursive filtering, transparency, filename conflicts/races, verified saves before recycling, partial/corrupt/truncated output cleanup and continuing after failures. UI checks cover format selection, recursive conversion/progress and cancellation of recycling confirmation. Recycle Bin operations are mocked against temporary fixtures.
 
+### Windows executable
+
+- Build from the project folder using `./venv/Scripts/python.exe -m PyInstaller --noconfirm --clean PixelForge.spec` to use the same interpreter as the installed application dependencies.
+- The spec resolves `run.py`, `src/` and assets from `SPECPATH`, so it does not depend on the current working directory. `pathex` includes `src`; the runtime `sys.path` insertion in `run.py` alone is insufficient for PyInstaller's build-time analysis.
+- All `src/pixelforge/assets/` files are included at `pixelforge/assets` inside the bundle, including `pixelforge.ico`, Poppins fonts and their license. Module-relative `__file__` paths in `theme.py` therefore work in source and frozen builds.
+- `copy_metadata("imageio")` is required in the spec's `datas`. Imageio 2.38.1 calls `importlib.metadata.version("imageio")` at import time. Its installed PyInstaller hook collects resources/plugins but omits distribution metadata; Python modules alone lead to `PackageNotFoundError` at startup. Direct CLI builds also need `--copy-metadata imageio`.
+- Remove a top-level `icuuc.dll` from `a.binaries` after analysis. The pinned Windows Qt build expects Windows' ICU API. An unrelated ICU DLL from Poppler/another application on PATH can otherwise be collected and shadow the system library, causing `DLL load failed while importing QtCore: The specified procedure could not be found`. The diagnostic build confirmed that excluding this collision fixes startup. Do not copy Windows system DLLs into the distribution.
+- Output: `dist/PixelForge/PixelForge.exe` with its `_internal` folder. Distribute the entire `dist/PixelForge` folder; the EXE alone is insufficient. No installed Python is required on the receiving machine. This is not an installer or a signed release.
+- `run.py --smoke-test -platform offscreen` and the same flags on the EXE construct the real QApplication/MainWindow, import all feature modules, load the theme/fonts and exit after the first event-loop iteration. Without `--smoke-test`, startup behavior is unchanged. `tests/test_startup.py` covers source-launcher smoke mode; verify the actual frozen EXE separately after building.
+- Latest verification (2026-10-19): all 42 tests passed. The final windowed `dist/PixelForge/PixelForge.exe --smoke-test -platform offscreen` exited with code 0 from a separate working directory with `PYTHONPATH` and `PYTHONHOME` removed. Bundled imageio 2.38.1 metadata, required Python modules, fonts/license and absence of the conflicting ICU DLL were checked. Installer, signing and a separate clean Windows machine remain untested.
+
 ## 10. Roadmap (in rough priority order)
 
 1. **Rename by date** (`core/dates.py` + UI): use the same date logic as `read_info`; preview table before applying; never overwrite; write a log for undo.
@@ -202,7 +214,7 @@ Run `python -m unittest discover -s tests -v` (use the venv interpreter). `tests
 3. **Similar-image detection** with `imagehash` (perceptual hash). This is when "suggested keeper" becomes meaningful (resolution/size differ). Beware O(n²) comparisons on big folders; consider bucketing or a BK-tree.
 4. **Undo for Gather** using `pixelforge_gather_log.json`.
 5. **Cancel button** for long operations.
-6. **Packaging:** PyInstaller folder mode, then an Inno Setup installer (Start Menu shortcut, uninstaller). Expect an installer of roughly 80–150 MB. Unsigned apps trigger a Windows SmartScreen warning ("More info", then "Run anyway"); fixing it needs a paid code-signing certificate.
+6. **Installer:** add an Inno Setup installer (Start Menu shortcut and uninstaller) around the PyInstaller folder build. Signing and clean-machine installation testing remain to be done.
 7. **HEIC support** (iPhone photos) would need `pillow-heif`; not included in `IMAGE_EXTENSIONS` today.
 8. Expand core regression coverage beyond the existing unittest metadata/UI checks.
 

@@ -8,4 +8,4 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from pixelforge.main import run  # noqa: E402
 
 if __name__ == "__main__":
-    run()
+    run(smoke_test="--smoke-test" in sys.argv)

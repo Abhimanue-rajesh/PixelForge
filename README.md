@@ -26,6 +26,24 @@ Run checks (the UI tests use Qt's offscreen platform):
 ./venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
 
+Build the Windows executable from the project folder:
+
+```powershell
+./venv/Scripts/python.exe -m PyInstaller --noconfirm --clean PixelForge.spec
+```
+
+Run `dist/PixelForge/PixelForge.exe`. Distribute the entire `dist/PixelForge` folder, including `_internal`; the executable needs those bundled files and does not require Python on the receiving computer. This is a portable folder build, not an installer.
+
+The checked-in spec adds `src` to PyInstaller's import search path, includes the app icon and Poppins fonts/license, and copies imageio's distribution metadata. Both imageio's Python modules and its `.dist-info` metadata are needed: imageio looks up its version at startup. A `sys.path` change in `run.py` alone does not tell PyInstaller where to find the package. If building directly from `run.py` instead, include `--paths src` and `--copy-metadata imageio`:
+
+```powershell
+./venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --windowed --name PixelForge --paths src --copy-metadata imageio --icon "src/pixelforge/assets/pixelforge.ico" --add-data "src/pixelforge/assets;pixelforge/assets" run.py
+```
+
+Prefer building from `PixelForge.spec` so the import path and bundled assets remain consistent. The spec also prevents an unrelated `icuuc.dll` on the build machine's PATH from shadowing the Windows ICU library required by Qt.
+
+For a startup-only check, launch `PixelForge.exe --smoke-test -platform offscreen`. This constructs the real application and exits after its first event-loop iteration without opening a desktop window. Wait for the process and check for exit code 0. Normal launches keep running as usual.
+
 Metadata removal supports JPEG, PNG, WebP, BMP and single-page TIFF. Animated and multi-page files are rejected. JPEG is re-encoded; removing rotation information or colour profiles can affect appearance. Explicitly overwriting an original cannot be undone. Gather currently has no undo action.
 
 Rotation processes supported still images directly in the input folder, without visiting subfolders. Positive angles rotate counterclockwise; negative angles rotate clockwise. Animated and multi-page files are skipped. Rotation resamples pixels and JPEG output is re-encoded. Originals remain in place.
